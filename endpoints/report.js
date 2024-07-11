@@ -1,49 +1,70 @@
-const PizZip = require("pizzip");
-const Docxtemplater = require("docxtemplater");
 const db = require('../database');
 const express = require('express');
-const path = require('path');
-const fs = require('fs');
+const createReport = require('../createReport');
 
 const router = express.Router();
 
 router.post('/create_report', async (req, res) => {
-  const { millitary_unit1, millitary_unit2, name_who_report } = req.body;
-
   try {
-    await createReport({ millitary_unit1, millitary_unit2, name_who_report });
+    const { millitary_unit1, millitary_unit2, name_who_report } = req.body;
+    // Получаем всех пользователей
+    const users = await new Promise((resolve, reject) => {
+      db.all('SELECT * FROM users', [], (err, rows) => {
+        if (err) {
+          return reject(err);
+        }
+        resolve(rows);
+      });
+    });
 
-    res.send('Отчет успешно создан');
+    // Получаем рабочие дни для каждого пользователя
+    const userReports = await Promise.all(users.map(async (user) => {
+      const days = await new Promise((resolve, reject) => {
+        db.all(
+          'SELECT * FROM workedCalendar WHERE user_id = ? AND is_payed = 0 ORDER BY date ASC LIMIT 30',
+          [user.id],
+          (err, rows) => {
+            if (err) {
+              return reject(err);
+            }
+            resolve(rows);
+          }
+        );
+      });
+
+      return {
+        user,
+        days
+      };
+    }));
+
+    // Передаем данные в функцию формирования отчета
+    createReport({ millitary_unit1, millitary_unit2, name_who_report });
+    // createReport(userReports);
+
+    // Обновляем записи о днях в базе данных
+    await Promise.all(userReports.map(async ({ user, days }) => {
+      const dayIds = days.map(day => day.id);
+      await new Promise((resolve, reject) => {
+        const placeholders = dayIds.map(() => '?').join(',');
+        db.run(
+          `UPDATE workedCalendar SET is_payed = 1 WHERE id IN (${placeholders})`,
+          dayIds,
+          (err) => {
+            if (err) {
+              return reject(err);
+            }
+            resolve();
+          }
+        );
+      });
+    }));
+
+    res.send('Отчет успешно создан и данные обновлены');
   } catch (error) {
-    return res.status(500).send('Ошибка при создании отчета');
+    console.error('Ошибка при создании отчета:', error);
+    res.status(500).send('Ошибка при создании отчета');
   }
 });
-
-async function createReport({millitary_unit1, millitary_unit2, name_who_report}) {
-    const content = fs.readFileSync(
-        path.resolve(__dirname, "template.docx"),
-        "binary"
-    );
-    
-    const zip = new PizZip(content);
-    
-    const doc = new Docxtemplater(zip, {
-        paragraphLoop: true,
-        linebreaks: true,
-    });
-    
-    doc.render({
-        millitary_unit1,
-        millitary_unit2,
-        name_who_report
-    });
-    
-    const buf = doc.getZip().generate({
-        type: "nodebuffer",
-        compression: "DEFLATE",
-    });
-    
-    fs.writeFileSync(path.resolve(__dirname, "report.docx"), buf);
-}
 
 module.exports = router;
